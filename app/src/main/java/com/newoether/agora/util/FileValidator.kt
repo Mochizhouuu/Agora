@@ -11,46 +11,125 @@ object FileValidator {
         TOO_LARGE
     }
 
-    private val MIME_WHITELIST = setOf(
+    private val MIME_PREFIX_WHITELIST = setOf(
         "text/",
+    )
+
+    private val MIME_EXACT_WHITELIST = setOf(
+        // Common structured data & documents
         "application/json",
         "application/xml",
         "application/yaml",
-        "application/pdf"
+        "application/x-yaml",
+        "application/pdf",
+        "application/rtf",
+        "application/toml",
+        "application/wasm",
+        "application/xhtml+xml",
+        "application/graphql",
+
+        // JavaScript & Web
+        "application/javascript",
+        "application/x-javascript",
+        "application/ecmascript",
+        "text/javascript",
+        "text/x-javascript",
+        "text/ecmascript",
+
+        // TypeScript & Web Component
+        "application/typescript",
+        "application/x-typescript",
+        "text/typescript",
+        "text/x-typescript",
+        "text/jsx",
+        "text/tsx",
+
+        // Code / Scripts / Shell
+        "application/x-sh",
+        "application/x-shellscript",
+        "application/x-python",
+        "text/x-python",
+        "application/x-php",
+        "application/x-httpd-php",
+        "application/sql",
+        "application/x-sql",
+        "application/x-c",
+        "application/x-cpp",
+        "application/x-ruby",
+        "application/x-perl",
     )
+
+    private val ALLOWED_EXTENSIONS = setOf(
+        // JavaScript / TypeScript / Web
+        "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "html", "htm", "css", "scss", "less", "vue", "svelte", "astro",
+
+        // Python / Ruby / Perl / PHP
+        "py", "pyw", "rb", "pl", "pm", "php",
+
+        // Java / Kotlin / JVM
+        "java", "kt", "kts", "groovy", "scala", "clj",
+
+        // C / C++ / C# / Objective-C
+        "c", "cpp", "cc", "cxx", "h", "hpp", "hxx", "cs", "m", "mm",
+
+        // Systems / Shell / Other Code
+        "rs", "go", "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd", "swift", "dart", "lua", "r", "asm", "s", "sql", "wasm", "zig", "nim",
+
+        // Data / Config / Markup
+        "json", "jsonl", "ndjson", "xml", "yaml", "yml", "toml", "ini", "conf", "config", "properties", "env", "gradle", "md", "markdown", "txt", "log", "csv", "tsv", "svg", "rtf", "tex"
+    )
+
     private const val MAX_SIZE = 20L * 1024 * 1024
 
     data class Result(val valid: Boolean, val error: Error? = null, val mimeType: String? = null)
 
     fun validate(context: Context, uri: Uri): Result {
-        val mimeType = try {
+        val rawMimeType = try {
             context.contentResolver.getType(uri)
         } catch (_: Exception) { null }
 
-        if (mimeType == null)
-            return Result(false, Error.UNKNOWN_TYPE, null)
+        val fileName = resolveFileName(context, uri) ?: uri.path?.substringAfterLast('/')
+        val extension = fileName?.substringAfterLast('.', "")?.lowercase()
 
-        val allowed = MIME_WHITELIST.any { mimeType.startsWith(it) } ||
-                      mimeType in MIME_WHITELIST
-        if (!allowed)
-            return Result(false, Error.UNSUPPORTED_TYPE, mimeType)
+        val isMimeAllowed = rawMimeType != null && (
+            MIME_PREFIX_WHITELIST.any { rawMimeType.startsWith(it) } ||
+            rawMimeType in MIME_EXACT_WHITELIST
+        )
 
-        val fileSize = try {
-            val cursor = context.contentResolver.query(
-                uri, arrayOf(OpenableColumns.SIZE), null, null, null
-            )
-            cursor?.use {
-                if (it.moveToFirst()) {
-                    val idx = it.getColumnIndex(OpenableColumns.SIZE)
-                    if (idx >= 0) it.getLong(idx) else null
-                } else null
+        val isExtensionAllowed = !extension.isNullOrEmpty() && extension in ALLOWED_EXTENSIONS
+
+        if (!isMimeAllowed && !isExtensionAllowed) {
+            return if (rawMimeType == null && extension.isNullOrEmpty()) {
+                Result(false, Error.UNKNOWN_TYPE, null)
+            } else {
+                Result(false, Error.UNSUPPORTED_TYPE, rawMimeType ?: extension)
             }
-        } catch (_: Exception) { null }
+        }
 
-        if (fileSize != null && fileSize > MAX_SIZE && mimeType != "application/pdf")
-            return Result(false, Error.TOO_LARGE, mimeType)
+        val effectiveMimeType = when {
+            isMimeAllowed && rawMimeType != null && rawMimeType != "application/octet-stream" -> rawMimeType
+            extension == "js" || extension == "mjs" || extension == "cjs" -> "application/javascript"
+            extension == "ts" || extension == "mts" || extension == "cts" -> "application/typescript"
+            extension == "jsx" -> "text/jsx"
+            extension == "tsx" -> "text/tsx"
+            extension == "json" || extension == "jsonl" -> "application/json"
+            extension == "xml" -> "application/xml"
+            extension == "yaml" || extension == "yml" -> "application/yaml"
+            extension == "html" || extension == "htm" -> "text/html"
+            extension == "css" -> "text/css"
+            extension == "csv" -> "text/csv"
+            extension == "md" || extension == "markdown" -> "text/markdown"
+            rawMimeType != null && rawMimeType != "application/octet-stream" -> rawMimeType
+            else -> "text/plain"
+        }
 
-        return Result(true, mimeType = mimeType)
+        val fileSize = resolveFileSize(context, uri)
+
+        if (fileSize != null && fileSize > MAX_SIZE && effectiveMimeType != "application/pdf") {
+            return Result(false, Error.TOO_LARGE, effectiveMimeType)
+        }
+
+        return Result(true, mimeType = effectiveMimeType)
     }
 
     fun resolveMimeType(context: Context, uriString: String): String? {
